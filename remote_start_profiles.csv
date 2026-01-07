@@ -1,0 +1,7 @@
+profileName,chargeBoxId,connectorId,locationId,chrgPointId,chrgPointConnectorDetId,chargingMethodId,chargingValue,chargingUnitId,isReservationTrans,reservationId,selectedWalletType,vehicleId
+Location5_Default,MHCGT000001_1,1,5,15,25,214,20,233,N,0,262,78
+Location5_Conn2,MHCGT000001_1,2,5,16,26,214,30,233,N,0,262,79
+Location6_Default,RB-DN-5089730,1,6,20,30,214,25,233,N,0,262,80
+Location6_Conn2,RB-DN-5089730,2,6,21,31,214,35,233,N,0,262,81
+Location6_Conn3,RB-DN-5089730,3,6,22,32,214,40,233,N,0,262,82
+AnyCP_Profile,*,*,5,0,0,214,20,233,N,0,262,78

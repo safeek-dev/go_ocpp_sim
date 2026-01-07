@@ -1,0 +1,9 @@
+chargeBoxId,connectorCount,chargePointVendor,chargePointModel,firmwareVersion,meterSerialNumber,meterType
+MHCGT000001_1,2,Delta,ACMini,1.0.3,MSN12345,ACMeter
+RB-DN-5089730,3,ABB,TerraAC,2.1.0,MSN56789,DCMeter
+P11-3.3-Ch2,3,Siemens,Sicharge,1.5.2,MSN11111,ACMeter
+RB-CA-11482154,1,Schneider,EVlink,3.0.1,MSN22222,ACMeter
+RB-PM-27334,1,Mennekes,AMTeco,2.0.0,MSN33333,DCMeter
+MHCGT000002_1,2,Delta,ACMini,1.0.3,MSN44444,ACMeter
+RB-DN-5089731,2,ABB,TerraAC,2.1.0,MSN55555,DCMeter
+P11-3.3-Ch3,4,Siemens,Sicharge,1.5.2,MSN66666,ACMeter
