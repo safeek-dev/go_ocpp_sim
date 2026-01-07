@@ -379,10 +379,13 @@ const indexHTML = `<!DOCTYPE html>
         
         .slider-container {
             margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         
         input[type="range"] {
-            width: 100%;
+            flex: 1;
             height: 6px;
             border-radius: 3px;
             background: #ddd;
@@ -407,6 +410,13 @@ const indexHTML = `<!DOCTYPE html>
             background: #667eea;
             cursor: pointer;
             border: none;
+        }
+        
+        .slider-value {
+            min-width: 50px;
+            text-align: right;
+            font-weight: 600;
+            color: #667eea;
         }
         
         .modal {
@@ -498,14 +508,14 @@ const indexHTML = `<!DOCTYPE html>
                     <label>Heartbeat Interval (seconds)</label>
                     <div class="slider-container">
                         <input type="range" id="heartbeatInterval" min="5" max="300" value="60">
-                        <span id="heartbeatValue">60</span>s
+                        <span class="slider-value"><span id="heartbeatValue">60</span>s</span>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>Meter Value Interval (seconds)</label>
                     <div class="slider-container">
                         <input type="range" id="meterValueInterval" min="5" max="300" value="60">
-                        <span id="meterValueValue">60</span>s
+                        <span class="slider-value"><span id="meterValueValue">60</span>s</span>
                     </div>
                 </div>
                 <button class="btn-primary" onclick="saveConfig()">💾 Save Config</button>
@@ -858,16 +868,46 @@ const indexHTML = `<!DOCTYPE html>
             }
         }
         
+        // Remote start all
+        async function remoteStartAll() {
+            const count = parseInt(prompt('How many transactions to start?', '1'));
+            if (isNaN(count) || count < 1) {
+                showNotification('Please enter a valid number', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/remote/start-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ count: count })
+                });
+                if (response.ok) {
+                    showNotification(count + ' transactions started', 'success');
+                    await refreshTransactions();
+                } else {
+                    showNotification('Failed to start transactions', 'error');
+                }
+            } catch (err) {
+                showNotification('Error: ' + err.message, 'error');
+            }
+        }
+
+        
         // Tab switching
-        function switchTab(tab, event) {
+        function switchTab(tabName, event) {
+            // Remove active class from all tabs and tab contents
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.tab-button').forEach(el => el.classList.remove('active'));
-            document.getElementById(tab).classList.add('active');
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            
+            // Add active class to selected tab content
+            document.getElementById(tabName).classList.add('active');
+            
+            // Add active class to clicked tab button
             if (event && event.target) {
                 event.target.classList.add('active');
             }
         }
-
         
         // Refresh metrics
         async function refreshMetrics() {
@@ -938,7 +978,7 @@ const indexHTML = `<!DOCTYPE html>
                         '<td style="font-size: 12px;">' + new Date(txn.startTime).toLocaleTimeString() + '</td>' +
                         '<td><span class="status-badge status-charging">' + txn.status + '</span></td>' +
                         '<td>' +
-                            '<button class="btn-sm btn-danger" onclick="stopTransaction(\\'' + txn.chargeBoxId + '\\', ' + txn.connectorId + ')">Stop</button>' +
+                            '<button class="btn-sm btn-danger" onclick="stopTransaction(\'' + txn.chargeBoxId + '\', ' + txn.connectorId + ')">Stop</button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
@@ -1018,7 +1058,7 @@ const indexHTML = `<!DOCTYPE html>
                     }).join('');
                 }
                 
-                switchTab('logs');
+                switchTab('logs', { target: document.querySelector('.tab:nth-child(4)') });
             } catch (err) {
                 showNotification('Error: ' + err.message, 'error');
             }
@@ -1059,19 +1099,31 @@ const indexHTML = `<!DOCTYPE html>
             }
         }
         
-        // Slider handlers
-        document.getElementById('heartbeatInterval').addEventListener('change', updateSliderValues);
-        document.getElementById('meterValueInterval').addEventListener('change', updateSliderValues);
+        // Slider handlers - Use 'input' event for live updates
+        function updateSliderValues() {
+            const heartbeatSlider = document.getElementById('heartbeatInterval');
+            const meterSlider = document.getElementById('meterValueInterval');
+            document.getElementById('heartbeatValue').textContent = heartbeatSlider.value;
+            document.getElementById('meterValueValue').textContent = meterSlider.value;
+        }
         
-        // Initial setup
-        loadSavedConfig();
-        updateCSVStatus();
-        refreshMetrics();
-        startAutoRefresh();
-        
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', () => {
-            stopAutoRefresh();
+        document.addEventListener('DOMContentLoaded', function() {
+            const heartbeatSlider = document.getElementById('heartbeatInterval');
+            const meterSlider = document.getElementById('meterValueInterval');
+            
+            heartbeatSlider.addEventListener('input', updateSliderValues);
+            meterSlider.addEventListener('input', updateSliderValues);
+            
+            // Initial load
+            loadSavedConfig();
+            updateCSVStatus();
+            refreshMetrics();
+            startAutoRefresh();
+            
+            // Cleanup on page unload
+            window.addEventListener('beforeunload', () => {
+                stopAutoRefresh();
+            });
         });
     </script>
 </body>
