@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gocarina/gocsv"
-
 	"ocpp-simulator/internal/configs"
 	"ocpp-simulator/internal/logging"
 	"ocpp-simulator/internal/metrics"
 	"ocpp-simulator/internal/models"
+
+	"github.com/gocarina/gocsv"
 )
 
 // Manager manages all charge point instances
@@ -85,12 +85,12 @@ func (m *Manager) LoadChargepoints(data []byte) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	m.chargepointConfigs = make(map[string]*models.ChargePoint)
 	for _, cp := range chargepoints {
 		m.chargepointConfigs[cp.ChargeBoxId] = cp
 	}
 
+	m.logger.LogInfo("Manager", fmt.Sprintf("Loaded %d chargepoints", len(chargepoints)))
 	return nil
 }
 
@@ -113,8 +113,8 @@ func (m *Manager) LoadRemoteStartProfiles(data []byte) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	m.remoteStartProfiles = profiles
+	m.logger.LogInfo("Manager", fmt.Sprintf("Loaded %d remote start profiles", len(profiles)))
 	return nil
 }
 
@@ -122,34 +122,52 @@ func (m *Manager) LoadRemoteStartProfiles(data []byte) error {
 func (m *Manager) GetCSVStatus() map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	return map[string]interface{}{
 		"chargepoints_loaded": len(m.chargepointConfigs),
 		"profiles_loaded":     len(m.remoteStartProfiles),
 	}
 }
 
-// StartCPs starts N charge points
-func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.SimulatorConfig) error {
+// StartCPs starts N charge points - FIXED VERSION WITH DETAILED RESULTS
+func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.SimulatorConfig) (map[string]interface{}, error) {
 	m.mu.RLock()
 	if count > len(m.chargepointConfigs) {
 		m.mu.RUnlock()
-		return fmt.Errorf("requested %d CPs but only %d available in config", count, len(m.chargepointConfigs))
+		return map[string]interface{}{
+			"requested": count,
+			"available": len(m.chargepointConfigs),
+		}, fmt.Errorf("requested %d CPs but only %d available in config", count, len(m.chargepointConfigs))
 	}
 	m.mu.RUnlock()
 
+	results := map[string]interface{}{
+		"requested":  count,
+		"started":    0,
+		"failed":     0,
+		"cp_details": make([]map[string]interface{}, 0),
+		"error_logs": make([]string, 0),
+	}
+
 	i := 0
 	m.mu.RLock()
+
+	// Collect configs to start
+	configsToStart := make([]*models.ChargePoint, 0)
 	for _, cpConfig := range m.chargepointConfigs {
 		if i >= count {
 			break
 		}
-		m.mu.RUnlock()
+		configsToStart = append(configsToStart, cpConfig)
+		i++
+	}
+	m.mu.RUnlock()
 
-		// Start CP instance if not already running
+	// Start each CP
+	for _, cpConfig := range configsToStart {
 		m.mu.Lock()
 		if _, exists := m.instances[cpConfig.ChargeBoxId]; exists {
 			m.mu.Unlock()
+			m.logger.LogInfo(cpConfig.ChargeBoxId, "CP already running, skipping")
 			continue
 		}
 
@@ -170,16 +188,49 @@ func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.Simulato
 		m.instances[cpConfig.ChargeBoxId] = instance
 		m.mu.Unlock()
 
-		// Start the CP goroutine
-		go instance.Run(ctx)
+		// Start the CP in a goroutine
+		// IMPORTANT: Increment metrics BEFORE starting goroutine to ensure accurate count
 		m.metricsTracker.IncrementActiveCPs()
-		i++
+		
+		go func(inst *CPInstance) {
+			// Defer cleanup to ensure metrics are decremented even if CP fails
+			defer func() {
+				m.metricsTracker.DecrementActiveCPs()
+				m.mu.Lock()
+				// Remove from instances map if still there (cleanup)
+				if _, exists := m.instances[inst.config.ChargeBoxId]; exists {
+					delete(m.instances, inst.config.ChargeBoxId)
+				}
+				m.mu.Unlock()
+				m.logger.LogInfo(inst.config.ChargeBoxId, "CP run completed and cleaned up")
+			}()
+			
+			inst.Run(ctx)
+		}(instance)
 
-		m.mu.RLock()
+		startedCount := results["started"].(int)
+		startedCount++
+		results["started"] = startedCount
+
+		// Add CP detail
+		details := map[string]interface{}{
+			"chargeBoxId": cpConfig.ChargeBoxId,
+			"status":      "started",
+			"connectors":  cpConfig.ConnectorCount,
+			"vendor":      cpConfig.Vendor,
+			"model":       cpConfig.Model,
+		}
+		results["cp_details"] = append(results["cp_details"].([]map[string]interface{}), details)
+
+		m.logger.LogInfo(cpConfig.ChargeBoxId, fmt.Sprintf("CP instance created, connecting to %s", cfg.OCPPServerURL))
 	}
-	m.mu.RUnlock()
 
-	return nil
+	if results["started"].(int) == 0 {
+		errorMsg := "No chargepoints were started. Check if configs are loaded and OCPP server is reachable."
+		results["error_logs"] = append(results["error_logs"].([]string), errorMsg)
+	}
+
+	return results, nil
 }
 
 // StopAll stops all charge points
@@ -189,6 +240,8 @@ func (m *Manager) StopAll(ctx context.Context) {
 	for _, instance := range m.instances {
 		instances = append(instances, instance)
 	}
+	// Clear instances map immediately to prevent new operations
+	m.instances = make(map[string]*CPInstance)
 	m.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -197,6 +250,8 @@ func (m *Manager) StopAll(ctx context.Context) {
 		go func(inst *CPInstance) {
 			defer wg.Done()
 			inst.Disconnect(ctx)
+			// Metrics will be decremented by the goroutine's defer in Run()
+			// But we also decrement here as a safety measure
 			m.metricsTracker.DecrementActiveCPs()
 		}(instance)
 	}
@@ -211,10 +266,6 @@ func (m *Manager) StopAll(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
-
-	m.mu.Lock()
-	m.instances = make(map[string]*CPInstance)
-	m.mu.Unlock()
 }
 
 // StopCP stops a specific charge point
@@ -227,8 +278,10 @@ func (m *Manager) StopCP(ctx context.Context, chargeBoxId string) {
 	}
 	delete(m.instances, chargeBoxId)
 	m.mu.Unlock()
-
+	
 	instance.Disconnect(ctx)
+	// Metrics will be decremented by the goroutine's defer in Run()
+	// But we also decrement here as a safety measure
 	m.metricsTracker.DecrementActiveCPs()
 }
 
@@ -236,7 +289,6 @@ func (m *Manager) StopCP(ctx context.Context, chargeBoxId string) {
 func (m *Manager) GetAllCPs() []map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	result := make([]map[string]interface{}, 0, len(m.instances))
 	for id, instance := range m.instances {
 		result = append(result, map[string]interface{}{
@@ -252,11 +304,9 @@ func (m *Manager) GetCP(chargeBoxId string) map[string]interface{} {
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return nil
 	}
-
 	return map[string]interface{}{
 		"chargeBoxId": chargeBoxId,
 		"status":      instance.GetStatus(),
@@ -267,7 +317,6 @@ func (m *Manager) GetCP(chargeBoxId string) map[string]interface{} {
 func (m *Manager) GetAllTransactions() []*models.Transaction {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	result := make([]*models.Transaction, 0, len(m.transactions))
 	for _, txn := range m.transactions {
 		result = append(result, txn)
@@ -281,11 +330,9 @@ func (m *Manager) SendBootNotification(ctx context.Context, chargeBoxId string) 
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
-
 	instance.SendBootNotification(ctx)
 	return nil
 }
@@ -294,11 +341,9 @@ func (m *Manager) SendHeartbeat(ctx context.Context, chargeBoxId string) error {
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
-
 	instance.SendHeartbeat(ctx)
 	return nil
 }
@@ -307,11 +352,9 @@ func (m *Manager) SendStatusNotification(ctx context.Context, chargeBoxId string
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
-
 	instance.SendStatusNotification(ctx, connectorId, status)
 	return nil
 }
@@ -320,7 +363,6 @@ func (m *Manager) StartTransaction(ctx context.Context, chargeBoxId string, conn
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return 0, fmt.Errorf("CP not found")
 	}
@@ -331,7 +373,6 @@ func (m *Manager) StartTransaction(ctx context.Context, chargeBoxId string, conn
 	m.transactionIdMutex.Unlock()
 
 	instance.StartTransaction(ctx, connectorId, idTag, meterStart, txnId)
-
 	txn := &models.Transaction{
 		TransactionId: txnId,
 		ChargeBoxId:   chargeBoxId,
@@ -354,7 +395,6 @@ func (m *Manager) StopTransaction(ctx context.Context, chargeBoxId string, conne
 	m.mu.RLock()
 	instance, exists := m.instances[chargeBoxId]
 	m.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
@@ -370,7 +410,6 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 	instance, exists := m.instances[chargeBoxId]
 	profiles := m.remoteStartProfiles
 	m.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
@@ -384,7 +423,6 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 			break
 		}
 	}
-
 	if profile == nil {
 		return fmt.Errorf("no matching remote start profile for CP")
 	}
@@ -416,8 +454,8 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote start HTTP error: %v", err))
 		return err
 	}
-	defer resp.Body.Close()
 
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote start HTTP error: %d - %s", resp.StatusCode, string(body)))
@@ -431,7 +469,6 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 	m.transactionIdMutex.Unlock()
 
 	instance.StartTransaction(ctx, connectorId, "REMOTE_RFID", 0, txnId)
-
 	txn := &models.Transaction{
 		TransactionId: txnId,
 		ChargeBoxId:   chargeBoxId,
@@ -459,7 +496,6 @@ func (m *Manager) RemoteStopTransaction(ctx context.Context, chargeBoxId string,
 	if !exists {
 		return fmt.Errorf("CP not found")
 	}
-
 	if !txnExists {
 		return fmt.Errorf("no active transaction")
 	}
@@ -469,7 +505,6 @@ func (m *Manager) RemoteStopTransaction(ctx context.Context, chargeBoxId string,
 		"chrgDetId": txn.ChrgDetId,
 	}
 	if txn.ChrgDetId == 0 {
-		// Fallback to transaction ID if chrgDetId not set
 		payload["transactionId"] = txn.TransactionId
 	}
 
@@ -484,14 +519,12 @@ func (m *Manager) RemoteStopTransaction(ctx context.Context, chargeBoxId string,
 	resp, err := client.Do(req)
 	if err != nil {
 		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote stop HTTP error: %v", err))
-		// Continue with OCPP stop anyway
 	} else {
 		resp.Body.Close()
 	}
 
 	// Send OCPP stop
 	instance.StopTransaction(ctx, connectorId)
-
 	return nil
 }
 
@@ -523,15 +556,3 @@ func (m *Manager) RemoteStopAllTransactions(ctx context.Context) {
 	case <-ctx.Done():
 	}
 }
-
-// Config wraps the main config passed to StartCPs
-// type Config struct {
-// 	OCPPServerURL      string
-// 	HeartbeatInterval  int
-// 	MeterValueInterval int
-// 	TransactionCutoff  int
-// 	RemoteStartURL     string
-// 	RemoteStopURL      string
-// 	RemoteStartToken   string
-// 	RemoteStopToken    string
-// }

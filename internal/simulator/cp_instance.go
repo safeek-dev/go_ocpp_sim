@@ -18,40 +18,40 @@ import (
 
 // CPInstance represents a single charge point instance
 type CPInstance struct {
-	config              *models.ChargePoint
-	ocppURL             string
-	heartbeatInterval   int
-	meterValueInterval  int
-	transactionCutoff   int
-	remoteStartURL      string
-	remoteStopURL       string
-	remoteStartToken    string
-	remoteStopToken     string
-	logger              *logging.Logger
-	metricsTracker      *metrics.Tracker
-	conn                *websocket.Conn
-	mu                  sync.RWMutex
-	status              string // booting, ready, charging, disconnecting, disconnected
-	connectors          map[int]*models.ConnectorState
-	activeTransactions  map[int]*TransactionState
-	messageCount        int
-	lastBootTime        time.Time
-	lastHeartbeat       time.Time
-	shutdownChan        chan struct{}
+	config             *models.ChargePoint
+	ocppURL            string
+	heartbeatInterval  int
+	meterValueInterval int
+	transactionCutoff  int
+	remoteStartURL     string
+	remoteStopURL      string
+	remoteStartToken   string
+	remoteStopToken    string
+	logger             *logging.Logger
+	metricsTracker     *metrics.Tracker
+	conn               *websocket.Conn
+	mu                 sync.RWMutex
+	status             string // booting, ready, charging, disconnecting, disconnected
+	connectors         map[int]*models.ConnectorState
+	activeTransactions map[int]*TransactionState
+	messageCount       int
+	lastBootTime       time.Time
+	lastHeartbeat      time.Time
+	shutdownChan       chan struct{}
 }
 
 // TransactionState tracks transaction-specific state
 type TransactionState struct {
-	TransactionId   int
-	ConnectorId     int
-	IdTag           string
-	MeterStart      int
-	MeterStop       int
-	StartTime       time.Time
-	Duration        time.Duration
-	CurrentEnergy   float64 // kWh
-	Status          string  // active, stopping, stopped
-	CutoffTime      time.Time
+	TransactionId int
+	ConnectorId   int
+	IdTag         string
+	MeterStart    int
+	MeterStop     int
+	StartTime     time.Time
+	Duration      time.Duration
+	CurrentEnergy float64 // kWh
+	Status        string  // active, stopping, stopped
+	CutoffTime    time.Time
 }
 
 // NewCPInstance creates a new CP instance
@@ -121,14 +121,22 @@ func (cp *CPInstance) connectAndBoot(ctx context.Context) error {
 	cp.status = "booting"
 	cp.mu.Unlock()
 
+	cp.logger.LogInfo(cp.config.ChargeBoxId, fmt.Sprintf("Attempting to connect to OCPP server at %s", cp.ocppURL))
+
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
 
 	conn, _, err := dialer.DialContext(ctx, cp.ocppURL, nil)
 	if err != nil {
+		cp.logger.LogError(cp.config.ChargeBoxId, fmt.Sprintf("WebSocket dial failed: %v (URL: %s)", err, cp.ocppURL))
+		cp.mu.Lock()
+		cp.status = "failed_to_connect"
+		cp.mu.Unlock()
 		return fmt.Errorf("websocket dial: %w", err)
 	}
+
+	cp.logger.LogInfo(cp.config.ChargeBoxId, "WebSocket connection established successfully")
 
 	cp.mu.Lock()
 	cp.conn = conn
@@ -136,11 +144,14 @@ func (cp *CPInstance) connectAndBoot(ctx context.Context) error {
 	cp.mu.Unlock()
 
 	// Send BootNotification
+	cp.logger.LogInfo(cp.config.ChargeBoxId, "Sending BootNotification")
 	cp.SendBootNotification(ctx)
 
 	cp.mu.Lock()
 	cp.status = "ready"
 	cp.mu.Unlock()
+
+	cp.logger.LogInfo(cp.config.ChargeBoxId, "CP ready for operation")
 
 	return nil
 }
@@ -162,11 +173,11 @@ func (cp *CPInstance) SendBootNotification(ctx context.Context) {
 		messageId,
 		"BootNotification",
 		map[string]string{
-			"chargePointVendor":  cp.config.Vendor,
-			"chargePointModel":   cp.config.Model,
-			"firmwareVersion":    cp.config.FirmwareVersion,
-			"meterSerialNumber":  cp.config.MeterSerialNo,
-			"meterType":          cp.config.MeterType,
+			"chargePointVendor": cp.config.Vendor,
+			"chargePointModel":  cp.config.Model,
+			"firmwareVersion":   cp.config.FirmwareVersion,
+			"meterSerialNumber": cp.config.MeterSerialNo,
+			"meterType":         cp.config.MeterType,
 		},
 	}
 
@@ -212,10 +223,10 @@ func (cp *CPInstance) SendStatusNotification(ctx context.Context, connectorId in
 		messageId,
 		"StatusNotification",
 		map[string]interface{}{
-			"connectorId":     connectorId,
-			"errorCode":       "NoError",
-			"status":          status,
-			"timestamp":       timestamp,
+			"connectorId": connectorId,
+			"errorCode":   "NoError",
+			"status":      status,
+			"timestamp":   timestamp,
 		},
 	}
 
@@ -266,16 +277,16 @@ func (cp *CPInstance) SendMeterValues(ctx context.Context, connectorId int) {
 			"timestamp": timestamp,
 			"sampledValue": []interface{}{
 				map[string]interface{}{
-					"value":      fmt.Sprintf("%.2f", power),
-					"measurand":  "Power.Active.Import",
-					"unit":       "kW",
-					"context":    "Transaction.In-Progress",
+					"value":     fmt.Sprintf("%.2f", power),
+					"measurand": "Power.Active.Import",
+					"unit":      "kW",
+					"context":   "Transaction.In-Progress",
 				},
 				map[string]interface{}{
-					"value":      fmt.Sprintf("%.2f", txn.CurrentEnergy),
-					"measurand":  "Energy.Active.Import.Register",
-					"unit":       "kWh",
-					"context":    "Transaction.In-Progress",
+					"value":     fmt.Sprintf("%.2f", txn.CurrentEnergy),
+					"measurand": "Energy.Active.Import.Register",
+					"unit":      "kWh",
+					"context":   "Transaction.In-Progress",
 				},
 			},
 		},
@@ -286,8 +297,8 @@ func (cp *CPInstance) SendMeterValues(ctx context.Context, connectorId int) {
 		messageId,
 		"MeterValues",
 		map[string]interface{}{
-			"connectorId":  connectorId,
-			"meterValue":   meterValues,
+			"connectorId":   connectorId,
+			"meterValue":    meterValues,
 			"transactionId": txn.TransactionId,
 		},
 	}
@@ -320,10 +331,10 @@ func (cp *CPInstance) StartTransaction(ctx context.Context, connectorId int, idT
 		messageId,
 		"StartTransaction",
 		map[string]interface{}{
-			"connectorId":  connectorId,
-			"idTag":        idTag,
-			"meterStart":   meterStart,
-			"timestamp":    timestamp,
+			"connectorId":   connectorId,
+			"idTag":         idTag,
+			"meterStart":    meterStart,
+			"timestamp":     timestamp,
 			"reservationId": 0,
 		},
 	}
@@ -366,11 +377,11 @@ func (cp *CPInstance) StopTransaction(ctx context.Context, connectorId int) {
 		messageId,
 		"StopTransaction",
 		map[string]interface{}{
-			"transactionId":  txn.TransactionId,
-			"idTag":          txn.IdTag,
-			"meterStop":      txn.MeterStop,
-			"timestamp":      timestamp,
-			"reason":         "Local",
+			"transactionId": txn.TransactionId,
+			"idTag":         txn.IdTag,
+			"meterStop":     txn.MeterStop,
+			"timestamp":     timestamp,
+			"reason":        "Local",
 		},
 	}
 
@@ -551,11 +562,12 @@ func (cp *CPInstance) GetStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"status":               cp.status,
-		"connectors":           connectorStates,
+		"status":                 cp.status,
+		"connectors":             connectorStates,
 		"activeTransactionCount": len(cp.activeTransactions),
-		"messageCount":         cp.messageCount,
-		"lastBootTime":         cp.lastBootTime.Format(time.RFC3339),
-		"lastHeartbeat":        cp.lastHeartbeat.Format(time.RFC3339),
+		"messageCount":           cp.messageCount,
+		"lastBootTime":           cp.lastBootTime.Format(time.RFC3339),
+		"lastHeartbeat":          cp.lastHeartbeat.Format(time.RFC3339),
 	}
 }
+

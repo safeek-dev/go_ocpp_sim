@@ -824,8 +824,35 @@ const indexHTML = `<!DOCTYPE html>
                 });
                 
                 if (response.ok) {
+                    const result = await response.json();
                     showNotification("Starting " + count + " charge points...", 'success');
-                    startAutoRefresh();
+                    
+                    // Wait a moment for CPs to start connecting, then check if any are active
+                    setTimeout(async () => {
+                        try {
+                            const metricsResponse = await fetch('/api/metrics');
+                            if (metricsResponse.ok) {
+                                const metrics = await metricsResponse.json();
+                                if (metrics.activeCPs > 0) {
+                                    // Only start auto-refresh if CPs are actually active
+                                    startAutoRefresh();
+                                } else {
+                                    // Check again after a delay (CPs might still be connecting)
+                                    setTimeout(async () => {
+                                        const retryMetrics = await fetch('/api/metrics');
+                                        if (retryMetrics.ok) {
+                                            const retryData = await retryMetrics.json();
+                                            if (retryData.activeCPs > 0) {
+                                                startAutoRefresh();
+                                            }
+                                        }
+                                    }, 3000);
+                                }
+                            }
+                        } catch (err) {
+                            console.error('Failed to check CP status:', err);
+                        }
+                    }, 2000);
                 } else {
                     const err = await response.text();
                     showNotification('Error: ' + err, 'error');
@@ -843,7 +870,12 @@ const indexHTML = `<!DOCTYPE html>
                 const response = await fetch('/api/cps/stop', { method: 'POST' });
                 if (response.ok) {
                     showNotification('All charge points stopped', 'success');
+                    // Stop auto-refresh immediately when CPs are stopped
                     stopAutoRefresh();
+                    // Clear the UI
+                    refreshMetrics();
+                    refreshCPs();
+                    refreshTransactions();
                 } else {
                     showNotification('Failed to stop CPs', 'error');
                 }
@@ -909,58 +941,66 @@ const indexHTML = `<!DOCTYPE html>
             }
         }
         
-        // Refresh metrics
+        // Refresh metrics with error handling
         async function refreshMetrics() {
-            try {
-                const response = await fetch('/api/metrics');
-                const data = await response.json();
-                
-                document.getElementById('activeCPs').textContent = data.activeCPs || 0;
-                document.getElementById('activeTransactions').textContent = data.activeTransactions || 0;
-                document.getElementById('messagesPerSec').textContent = (data.messagesPerSecond || 0).toFixed(2);
-                document.getElementById('totalMessages').textContent = data.totalMessages || 0;
-                document.getElementById('msgSent').textContent = data.messagesSent || 0;
-                document.getElementById('msgRecv').textContent = data.messagesReceived || 0;
-            } catch (err) {
-                console.error('Failed to fetch metrics:', err);
+            const response = await fetch('/api/metrics');
+            if (!response.ok) {
+                throw new Error("HTTP" response.status+":"+ response.statusText);
             }
+            const data = await response.json();
+            
+            document.getElementById('activeCPs').textContent = data.activeCPs || 0;
+            document.getElementById('activeTransactions').textContent = data.activeTransactions || 0;
+            document.getElementById('messagesPerSec').textContent = (data.messagesPerSecond || 0).toFixed(2);
+            document.getElementById('totalMessages').textContent = data.totalMessages || 0;
+            document.getElementById('msgSent').textContent = data.messagesSent || 0;
+            document.getElementById('msgRecv').textContent = data.messagesReceived || 0;
+            
+            // Auto-start refresh if CPs become active (e.g., after page load)
+            if (data.activeCPs > 0 && !autoRefreshInterval) {
+                console.log('CPs detected as active, starting auto-refresh');
+                startAutoRefresh();
+            }
+            
+            return data;
         }
         
-        // Refresh CPs table
+        // Refresh CPs table with error handling
         async function refreshCPs() {
-            try {
-                const response = await fetch('/api/cps');
-                const cps = await response.json() || [];
-                
-                const tbody = document.getElementById('cpTableBody');
-                if (cps.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #999;">No active CPs</td></tr>';
-                    return;
-                }
-                
-                tbody.innerHTML = cps.map(function(cp) {
-                    return '<tr>' +
-                        '<td><strong>' + cp.chargeBoxId + '</strong></td>' +
-                        '<td><span class="status-badge status-' + cp.status.status + '">' + cp.status.status + '</span></td>' +
-                        '<td>' + Object.keys(cp.status.connectors).length + '</td>' +
-                        '<td>' + cp.status.activeTransactionCount + '</td>' +
-                        '<td>' + cp.status.messageCount + '</td>' +
-                        '<td style="font-size: 12px;">' + new Date(cp.status.lastBootTime).toLocaleTimeString() + '</td>' +
-                        '<td>' +
-                            '<button class="btn-sm btn-secondary" onclick="viewCPLogs(\'' + cp.chargeBoxId + '\')">Logs</button>' +
-                            '<button class="btn-sm btn-danger" onclick="stopCP(\'' + cp.chargeBoxId + '\')">Stop</button>' +
-                        '</td>' +
-                    '</tr>';
-                }).join('');
-            } catch (err) {
-                console.error('Failed to fetch CPs:', err);
+            const response = await fetch('/api/cps');
+            if (!response.ok) {
+                throw new Error("HTTP "response.status":" response.statusText);
             }
+            const cps = await response.json() || [];
+            
+            const tbody = document.getElementById('cpTableBody');
+            if (cps.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #999;">No active CPs</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = cps.map(function(cp) {
+                return '<tr>' +
+                    '<td><strong>' + cp.chargeBoxId + '</strong></td>' +
+                    '<td><span class="status-badge status-' + cp.status.status + '">' + cp.status.status + '</span></td>' +
+                    '<td>' + Object.keys(cp.status.connectors).length + '</td>' +
+                    '<td>' + cp.status.activeTransactionCount + '</td>' +
+                    '<td>' + cp.status.messageCount + '</td>' +
+                    '<td style="font-size: 12px;">' + new Date(cp.status.lastBootTime).toLocaleTimeString() + '</td>' +
+                    '<td>' +
+                        '<button class="btn-sm btn-secondary" onclick="viewCPLogs(\'' + cp.chargeBoxId + '\')">Logs</button>' +
+                        '<button class="btn-sm btn-danger" onclick="stopCP(\'' + cp.chargeBoxId + '\')">Stop</button>' +
+                    '</td>' +
+                '</tr>';
+            }).join('');
         }
         
-        // Refresh transactions
+        // Refresh transactions with error handling
         async function refreshTransactions() {
-            try {
                 const response = await fetch('/api/transactions');
+            if (!response.ok) {
+                throw new Error("HTTP "response.status":" response.statusText);
+            }
                 const txns = await response.json() || [];
                 
                 const tbody = document.getElementById('txnTableBody');
@@ -982,35 +1022,31 @@ const indexHTML = `<!DOCTYPE html>
                         '</td>' +
                     '</tr>';
                 }).join('');
-            } catch (err) {
-                console.error('Failed to fetch transactions:', err);
-            }
         }
         
-        // Refresh logs
+        // Refresh logs with error handling
         async function refreshLogs() {
-            try {
-                const response = await fetch('/api/logs?limit=50');
-                const logs = await response.json() || [];
-                
-                const container = document.getElementById('logsContainer');
-                if (logs.length === 0) {
-                    container.innerHTML = '<p style="color: #999;">No logs available</p>';
-                    return;
-                }
-                
-                container.innerHTML = logs.map(function(log) {
-                    return '<div class="log-entry">' +
-                        '<span class="log-timestamp">' + log.timestamp + '</span>' +
-                        '<span class="log-cp">[' + log.chargeBoxId + ']</span>' +
-                        '<span class="log-direction">' + log.direction + '</span>' +
-                        '<span class="log-action">' + log.action + '</span>' +
-                        '<span style="color: #98c379;">' + (log.status || 'CALL') + '</span>' +
-                    '</div>';
-                }).join('');
-            } catch (err) {
-                console.error('Failed to fetch logs:', err);
+            const response = await fetch('/api/logs?limit=50');
+            if (!response.ok) {
+                throw new Error("HTTP "+response.status+": "+response.statusText);
             }
+            const logs = await response.json() || [];
+            
+            const container = document.getElementById('logsContainer');
+            if (logs.length === 0) {
+                container.innerHTML = '<p style="color: #999;">No logs available</p>';
+                return;
+            }
+            
+            container.innerHTML = logs.map(function(log) {
+                return '<div class="log-entry">' +
+                    '<span class="log-timestamp">' + log.timestamp + '</span>' +
+                    '<span class="log-cp">[' + log.chargeBoxId + ']</span>' +
+                    '<span class="log-direction">' + log.direction + '</span>' +
+                    '<span class="log-action">' + log.action + '</span>' +
+                    '<span style="color: #98c379;">' + (log.status || 'CALL') + '</span>' +
+                '</div>';
+            }).join('');
         }
         
         // Stop specific CP
@@ -1020,6 +1056,11 @@ const indexHTML = `<!DOCTYPE html>
                 if (response.ok) {
                     showNotification('CP stopped', 'success');
                     await refreshCPs();
+                    // Check if any CPs remain active
+                    const metrics = await refreshMetrics();
+                    if (metrics.activeCPs === 0 && metrics.activeTransactions === 0) {
+                        stopAutoRefresh();
+                    }
                 }
             } catch (err) {
                 showNotification('Error: ' + err.message, 'error');
@@ -1079,23 +1120,67 @@ const indexHTML = `<!DOCTYPE html>
             setTimeout(() => alert.remove(), 4000);
         }
         
-        // Auto-refresh
+        // Auto-refresh with configurable interval and error handling
         let autoRefreshInterval;
+        let refreshInterval = 5000; // Default 5 seconds (more optimal than 2s)
+        let consecutiveErrors = 0;
+        const MAX_CONSECUTIVE_ERRORS = 3;
         
         function startAutoRefresh() {
             if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-            autoRefreshInterval = setInterval(() => {
-                refreshMetrics();
-                refreshCPs();
-                refreshTransactions();
-                refreshLogs();
-            }, 2000);
+            
+            console.log('Starting auto-refresh (CPs are active)');
+            
+            // Only refresh if there are active CPs or transactions
+            autoRefreshInterval = setInterval(async () => {
+                try {
+                    // Check if we should continue refreshing
+                    const metricsResponse = await fetch('/api/metrics');
+                    if (!metricsResponse.ok) {
+                        consecutiveErrors++;
+                        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                            console.warn('Too many API errors, pausing auto-refresh');
+                            stopAutoRefresh();
+                            return;
+                        }
+                        return;
+                    }
+                    
+                    const metrics = await metricsResponse.json();
+                    consecutiveErrors = 0; // Reset on success
+                    
+                    // If no CPs are active, stop auto-refresh
+                    if (metrics.activeCPs === 0 && metrics.activeTransactions === 0) {
+                        console.log('No active CPs or transactions, stopping auto-refresh');
+                        stopAutoRefresh();
+                        return;
+                    }
+                    
+                    // Only refresh if there's activity
+                    if (metrics.activeCPs > 0 || metrics.activeTransactions > 0) {
+                        await Promise.all([
+                            refreshMetrics().catch(err => console.error('Metrics refresh failed:', err)),
+                            refreshCPs().catch(err => console.error('CPs refresh failed:', err)),
+                            refreshTransactions().catch(err => console.error('Transactions refresh failed:', err)),
+                            refreshLogs().catch(err => console.error('Logs refresh failed:', err))
+                        ]);
+                    }
+                } catch (err) {
+                    consecutiveErrors++;
+                    console.error('Auto-refresh error:', err);
+                    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                        stopAutoRefresh();
+                        showNotification('Auto-refresh paused due to errors. Refresh page to resume.', 'error');
+                    }
+                }
+            }, refreshInterval);
         }
         
         function stopAutoRefresh() {
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
                 autoRefreshInterval = null;
+                console.log('Stopped auto-refresh (no active CPs)');
             }
         }
         
@@ -1117,8 +1202,19 @@ const indexHTML = `<!DOCTYPE html>
             // Initial load
             loadSavedConfig();
             updateCSVStatus();
-            refreshMetrics();
-            startAutoRefresh();
+            refreshMetrics().then((metrics) => {
+                // Only start auto-refresh if there are already active CPs
+                // (e.g., if page was refreshed while CPs were running)
+                if (metrics && metrics.activeCPs > 0) {
+                    console.log('Found active CPs on page load, starting auto-refresh');
+                    startAutoRefresh();
+                } else {
+                    console.log('No active CPs on page load, auto-refresh will start when CPs are connected');
+                }
+            }).catch(err => {
+                console.error('Initial metrics load failed:', err);
+                // Don't start auto-refresh on error - wait for user to start CPs
+            });
             
             // Cleanup on page unload
             window.addEventListener('beforeunload', () => {

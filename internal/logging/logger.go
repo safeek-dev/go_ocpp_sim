@@ -154,6 +154,22 @@ func (l *Logger) LogError(chargeBoxId, message string) {
 	l.messageFile.Write(append(data, '\n'))
 }
 
+// LogInfo logs an informational message
+func (l *Logger) LogInfo(chargeBoxId, message string) {
+	entry := map[string]interface{}{
+		"timestamp":   time.Now().UTC().Format(time.RFC3339Nano),
+		"chargeBoxId": chargeBoxId,
+		"level":       "INFO",
+		"message":     message,
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	data, _ := json.Marshal(entry)
+	l.messageFile.Write(append(data, '\n'))
+}
+
 // GetCPLogs returns recent logs for a specific CP
 func (l *Logger) GetCPLogs(chargeBoxId string) []*OCPPMessageLog {
 	l.recentLogsMutex.RLock()
