@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,22 +120,36 @@ func (cp *CPInstance) Run(ctx context.Context) {
 
 // connectAndBoot establishes WebSocket connection and sends BootNotification
 func (cp *CPInstance) connectAndBoot(ctx context.Context) error {
+	dialCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // or use ctx if you're sure it's long-lived
+	defer cancel()
 	cp.mu.Lock()
 	cp.status = "booting"
 	cp.mu.Unlock()
 
-	cp.logger.LogInfo(cp.config.ChargeBoxId, fmt.Sprintf("Attempting to connect to OCPP server at %s", cp.ocppURL))
+	fullURL := cp.ocppURL
+	if !strings.HasSuffix(fullURL, "/") {
+		fullURL += "/"
+	}
+	// Avoid double slashes if the path already had one, but ensure ID is there
+	fullURL = fmt.Sprintf("%s%s", strings.TrimSuffix(cp.ocppURL, "/"), "/"+cp.config.ChargeBoxId)
+
+	cp.logger.LogInfo(cp.config.ChargeBoxId, fmt.Sprintf("Attempting to connect to OCPP server at %s", fullURL))
+
+	header := http.Header{}
+	header.Add("Sec-WebSocket-Protocol", "ocpp1.6") // CRITICAL: This matches your working curl command
 
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 5 * time.Second,
+		HandshakeTimeout: 60 * time.Second,
 	}
 
-	conn, _, err := dialer.DialContext(ctx, cp.ocppURL, nil)
+	conn, resp, err := dialer.DialContext(dialCtx, fullURL, header)
 	if err != nil {
-		cp.logger.LogError(cp.config.ChargeBoxId, fmt.Sprintf("WebSocket dial failed: %v (URL: %s)", err, cp.ocppURL))
-		cp.mu.Lock()
-		cp.status = "failed_to_connect"
-		cp.mu.Unlock()
+		if dialCtx.Err() != nil {
+			cp.logger.LogError(cp.config.ChargeBoxId, fmt.Sprintf("Dial canceled: %v", dialCtx.Err()))
+		} else if resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			cp.logger.LogError(cp.config.ChargeBoxId, fmt.Sprintf("Handshake failed: %d %s - %s", resp.StatusCode, resp.Status, string(body)))
+		}
 		return fmt.Errorf("websocket dial: %w", err)
 	}
 
@@ -146,6 +163,13 @@ func (cp *CPInstance) connectAndBoot(ctx context.Context) error {
 	// Send BootNotification
 	cp.logger.LogInfo(cp.config.ChargeBoxId, "Sending BootNotification")
 	cp.SendBootNotification(ctx)
+
+	cp.SendStatusNotification(ctx, 0, "Available")
+
+	// Send status for all individual connectors
+	for i := 1; i <= cp.config.ConnectorCount; i++ {
+		cp.SendStatusNotification(ctx, i, "Available")
+	}
 
 	cp.mu.Lock()
 	cp.status = "ready"
@@ -398,17 +422,22 @@ func (cp *CPInstance) StopTransaction(ctx context.Context, connectorId int) {
 // ============ Background Loops ============
 
 func (cp *CPInstance) heartbeatLoop(ctx context.Context) {
+	cp.logger.LogInfo(cp.config.ChargeBoxId, "DEBUG: Heartbeat loop STARTED") // Check if this appears
+
 	ticker := time.NewTicker(time.Duration(cp.heartbeatInterval) * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-ticker.C:
+			cp.logger.LogInfo(cp.config.ChargeBoxId, "DEBUG: Ticker triggered, sending Heartbeat")
+			cp.SendHeartbeat(ctx)
 		case <-ctx.Done():
+			cp.logger.LogInfo(cp.config.ChargeBoxId, "DEBUG: Heartbeat loop STOPPED via Context")
 			return
 		case <-cp.shutdownChan:
+			cp.logger.LogInfo(cp.config.ChargeBoxId, "DEBUG: Heartbeat loop STOPPED via ShutdownChan")
 			return
-		case <-ticker.C:
-			cp.SendHeartbeat(ctx)
 		}
 	}
 }
@@ -570,4 +599,3 @@ func (cp *CPInstance) GetStatus() map[string]interface{} {
 		"lastHeartbeat":          cp.lastHeartbeat.Format(time.RFC3339),
 	}
 }
-

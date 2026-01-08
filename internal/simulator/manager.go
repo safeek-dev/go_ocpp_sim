@@ -191,7 +191,7 @@ func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.Simulato
 		// Start the CP in a goroutine
 		// IMPORTANT: Increment metrics BEFORE starting goroutine to ensure accurate count
 		m.metricsTracker.IncrementActiveCPs()
-		
+
 		go func(inst *CPInstance) {
 			// Defer cleanup to ensure metrics are decremented even if CP fails
 			defer func() {
@@ -204,8 +204,8 @@ func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.Simulato
 				m.mu.Unlock()
 				m.logger.LogInfo(inst.config.ChargeBoxId, "CP run completed and cleaned up")
 			}()
-			
-			inst.Run(ctx)
+
+			inst.Run(context.Background())
 		}(instance)
 
 		startedCount := results["started"].(int)
@@ -278,7 +278,7 @@ func (m *Manager) StopCP(ctx context.Context, chargeBoxId string) {
 	}
 	delete(m.instances, chargeBoxId)
 	m.mu.Unlock()
-	
+
 	instance.Disconnect(ctx)
 	// Metrics will be decremented by the goroutine's defer in Run()
 	// But we also decrement here as a safety measure

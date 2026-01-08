@@ -945,7 +945,7 @@ const indexHTML = `<!DOCTYPE html>
         async function refreshMetrics() {
             const response = await fetch('/api/metrics');
             if (!response.ok) {
-                throw new Error("HTTP" response.status+":"+ response.statusText);
+                throw new Error("HTTP"+ response.status+":"+ response.statusText);
             }
             const data = await response.json();
             
@@ -969,7 +969,7 @@ const indexHTML = `<!DOCTYPE html>
         async function refreshCPs() {
             const response = await fetch('/api/cps');
             if (!response.ok) {
-                throw new Error("HTTP "response.status":" response.statusText);
+                throw new Error("HTTP "+response.status+":"+ response.statusText);
             }
             const cps = await response.json() || [];
             
@@ -999,7 +999,7 @@ const indexHTML = `<!DOCTYPE html>
         async function refreshTransactions() {
                 const response = await fetch('/api/transactions');
             if (!response.ok) {
-                throw new Error("HTTP "response.status":" response.statusText);
+                throw new Error("HTTP " + response.status + ":"+ response.statusText);
             }
                 const txns = await response.json() || [];
                 

@@ -1,2 +1,2 @@
 chargeBoxId,connectorCount,chargePointVendor,chargePointModel,firmwareVersion,meterSerialNumber,meterType
-RBZ0185TBZVX,1,SimuCharge,SC-1000,1.2.3,METER12345,ACME_SmartMeter_v1
+RB-DN-5089730,3,MAGENTA,PENTA-IEC,O:3.03|E:3.03,METER12345,DC
