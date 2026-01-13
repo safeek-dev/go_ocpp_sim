@@ -69,6 +69,7 @@ func main() {
 	// Using method checks for Go 1.21 compatibility (method-specific routing requires Go 1.22+)
 	mux.HandleFunc("/api/metrics", methodCheck("GET", handleGetMetrics))
 	mux.HandleFunc("/api/csv/status", methodCheck("GET", handleCSVStatus))
+	mux.HandleFunc("/api/csv/data", methodCheck("GET", handleGetCSVData))
 	mux.HandleFunc("/api/transactions", methodCheck("GET", handleGetTransactions))
 	mux.HandleFunc("/api/cps", handleCPsRouter) // Handles both GET and POST
 	mux.HandleFunc("/api/logs", handleLogsRouter) // Handles GET with optional path param
@@ -150,21 +151,15 @@ func handleCPsRouter(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Handle /api/cps/{chargeBoxId} or /api/cps/{chargeBoxId}/stop
-	parts := splitPath(path[len("/api/cps/"):])
-	if len(parts) == 0 {
+	remainingPath := strings.TrimPrefix(path, "/api/cps/")
+	if remainingPath == "" {
 		http.NotFound(w, r)
 		return
 	}
 	
-	chargeBoxId := parts[0]
-	if len(parts) == 1 {
-		if r.Method == "GET" {
-			r = setPathValue(r, "chargeBoxId", chargeBoxId)
-			handleGetCP(w, r)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	} else if len(parts) == 2 && parts[1] == "stop" {
+	// Check if it ends with /stop
+	if strings.HasSuffix(remainingPath, "/stop") {
+		chargeBoxId := strings.TrimSuffix(remainingPath, "/stop")
 		if r.Method == "POST" {
 			r = setPathValue(r, "chargeBoxId", chargeBoxId)
 			handleStopCP(w, r)
@@ -172,7 +167,14 @@ func handleCPsRouter(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	} else {
-		http.NotFound(w, r)
+		// Just the chargeBoxId
+		chargeBoxId := remainingPath
+		if r.Method == "GET" {
+			r = setPathValue(r, "chargeBoxId", chargeBoxId)
+			handleGetCP(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 }
 
@@ -191,10 +193,12 @@ func handleLogsRouter(w http.ResponseWriter, r *http.Request) {
 	
 	// Handle /api/logs/{chargeBoxId}
 	if strings.HasPrefix(path, "/api/logs/") {
-		chargeBoxId := path[len("/api/logs/"):]
-		r = setPathValue(r, "chargeBoxId", chargeBoxId)
-		handleGetCPLogs(w, r)
-		return
+		chargeBoxId := strings.TrimPrefix(path, "/api/logs/")
+		if chargeBoxId != "" {
+			r = setPathValue(r, "chargeBoxId", chargeBoxId)
+			handleGetCPLogs(w, r)
+			return
+		}
 	}
 	
 	http.NotFound(w, r)
@@ -283,6 +287,15 @@ func handleRemoteRouter(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 && parts[0] == "stop-all" {
 		if r.Method == "POST" {
 			handleRemoteStopAll(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	
+	if len(parts) == 1 && parts[0] == "start-all" {
+		if r.Method == "POST" {
+			handleRemoteStartAll(w, r)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -447,6 +460,10 @@ func handleUploadProfiles(w http.ResponseWriter, r *http.Request) {
 
 func handleCSVStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, cpManager.GetCSVStatus(), http.StatusOK)
+}
+
+func handleGetCSVData(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, cpManager.GetCSVData(), http.StatusOK)
 }
 
 // ============ CP Simulation Handlers ============
@@ -630,6 +647,15 @@ func handleRemoteStop(w http.ResponseWriter, r *http.Request) {
 
 func handleRemoteStopAll(w http.ResponseWriter, r *http.Request) {
 	cpManager.RemoteStopAllTransactions(r.Context())
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+}
+
+func handleRemoteStartAll(w http.ResponseWriter, r *http.Request) {
+	err := cpManager.RemoteStartAllTransactions(r.Context())
+	if err != nil {
+		jsonResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 

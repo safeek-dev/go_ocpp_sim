@@ -184,6 +184,17 @@ const indexHTML = `<!DOCTYPE html>
         .btn-sm {
             padding: 6px 12px;
             font-size: 12px;
+            min-width: 32px;
+        }
+        
+        .btn-icon {
+            padding: 6px 8px;
+            font-size: 14px;
+            min-width: 32px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
         }
         
         .tabs {
@@ -588,6 +599,7 @@ const indexHTML = `<!DOCTYPE html>
                 <button class="tab" onclick="switchTab('cps', event)">⚡ Charge Points</button>
                 <button class="tab" onclick="switchTab('transactions', event)">💳 Transactions</button>
                 <button class="tab" onclick="switchTab('logs', event)">📝 Logs</button>
+                <button class="tab" onclick="switchTab('csvData', event)">📊 CSV Data</button>
             </div>
             
             <div id="overview" class="tab-content active">
@@ -625,7 +637,7 @@ const indexHTML = `<!DOCTYPE html>
                                 <th>Active Txns</th>
                                 <th>Messages</th>
                                 <th>Last Boot</th>
-                                <th>Actions</th>
+                                <th>Manage</th>
                             </tr>
                         </thead>
                         <tbody id="cpTableBody">
@@ -638,6 +650,7 @@ const indexHTML = `<!DOCTYPE html>
             <div id="transactions" class="tab-content">
                 <h2 style="margin-bottom: 20px;">Active Transactions</h2>
                 <div class="button-group">
+                    <button class="btn-success" onclick="remoteStartAll()">🚀 Remote Start All</button>
                     <button class="btn-danger" onclick="remoteStopAll()">🛑 Remote Stop All</button>
                 </div>
                 <div class="table-wrapper" style="margin-top: 15px;">
@@ -667,10 +680,99 @@ const indexHTML = `<!DOCTYPE html>
                 </div>
                 <button class="btn-secondary" onclick="refreshLogs()" style="margin-top: 15px;">🔄 Refresh Logs</button>
             </div>
+            
+            <div id="csvData" class="tab-content">
+                <h2 style="margin-bottom: 20px;">CSV Data</h2>
+                <div class="tabs" style="margin-bottom: 20px; border-bottom: 2px solid #f0f0f0;">
+                    <button class="tab active" onclick="switchCSVTab('chargepoints', event)">📍 Chargepoints CSV</button>
+                    <button class="tab" onclick="switchCSVTab('profiles', event)">🔋 Profiles CSV</button>
+                </div>
+                
+                <div id="csvChargepointsTab" class="csv-tab-content" style="display: block;">
+                    <h3 style="margin-bottom: 15px; color: #667eea;">Chargepoints Data</h3>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Charge Box ID</th>
+                                    <th>Connectors</th>
+                                </tr>
+                            </thead>
+                            <tbody id="csvChargepointsBody">
+                                <tr><td colspan="3" style="text-align: center; color: #999;">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <div id="csvProfilesTab" class="csv-tab-content" style="display: none;">
+                    <h3 style="margin-bottom: 15px; color: #667eea;">Remote Start Profiles Data</h3>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Charge Box ID</th>
+                                    <th>Connector ID</th>
+                                    <th>Profile Name</th>
+                                </tr>
+                            </thead>
+                            <tbody id="csvProfilesBody">
+                                <tr><td colspan="4" style="text-align: center; color: #999;">No data loaded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
     <div id="notificationAlert"></div>
+    
+    <!-- Remote Start Modal -->
+    <div id="remoteStartModal" class="modal">
+        <div class="modal-content" style="position: relative;">
+            <button class="modal-close" onclick="closeRemoteStartModal()">×</button>
+            <div class="modal-header">Remote Start Transaction</div>
+            <div id="remoteStartModalBody">
+                <p>Select a connector to start:</p>
+                <div id="connectorSelection"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Status Notification Modal -->
+    <div id="statusModal" class="modal">
+        <div class="modal-content" style="position: relative;">
+            <button class="modal-close" onclick="closeStatusModal()">×</button>
+            <div class="modal-header">Send Status Notification</div>
+            <div id="statusModalBody">
+                <p>Select connector and status for <strong id="statusModalCP"></strong>:</p>
+                <div class="form-group">
+                    <label>Connector ID</label>
+                    <select id="statusConnectorSelect">
+                        <option value="0">0 (Charge Point)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Status</label>
+                    <select id="statusSelect">
+                        <option value="Available">Available</option>
+                        <option value="Preparing">Preparing</option>
+                        <option value="Charging">Charging</option>
+                        <option value="SuspendedEVSE">Suspended EVSE</option>
+                        <option value="SuspendedEV">Suspended EV</option>
+                        <option value="Finishing">Finishing</option>
+                        <option value="Reserved">Reserved</option>
+                        <option value="Unavailable">Unavailable</option>
+                        <option value="Faulted">Faulted</option>
+                    </select>
+                </div>
+                <button class="btn-primary" onclick="sendStatusNotification()">Send Status</button>
+            </div>
+        </div>
+    </div>
     
     <script>
         // Configuration
@@ -754,8 +856,16 @@ const indexHTML = `<!DOCTYPE html>
                 });
                 
                 if (response.ok) {
-                    showNotification('Chargepoints CSV uploaded successfully!', 'success');
+                    const result = await response.json();
                     await updateCSVStatus();
+                    await loadCSVData();
+                    
+                    // Get the count and show in notification
+                    const status = await fetch('/api/csv/status').then(r => r.json());
+                    showNotification('Chargepoints CSV uploaded successfully! ' + status.chargepoints_loaded + ' chargepoints loaded.', 'success');
+                    
+                    // Switch to CSV Data tab to show the uploaded data
+                    switchTab('csvData', { target: document.querySelectorAll('.tab')[4] });
                 } else {
                     const err = await response.text();
                     showNotification('Error: ' + err, 'error');
@@ -781,8 +891,16 @@ const indexHTML = `<!DOCTYPE html>
                 });
                 
                 if (response.ok) {
-                    showNotification('Remote start profiles uploaded successfully!', 'success');
+                    const result = await response.json();
                     await updateCSVStatus();
+                    await loadCSVData();
+                    
+                    // Get the count and show in notification
+                    const status = await fetch('/api/csv/status').then(r => r.json());
+                    showNotification('Remote start profiles uploaded successfully! ' + status.profiles_loaded + ' profiles loaded.', 'success');
+                    
+                    // Switch to CSV Data tab to show the uploaded data
+                    switchTab('csvData', { target: document.querySelectorAll('.tab')[4] });
                 } else {
                     const err = await response.text();
                     showNotification('Error: ' + err, 'error');
@@ -902,29 +1020,215 @@ const indexHTML = `<!DOCTYPE html>
         
         // Remote start all
         async function remoteStartAll() {
-            const count = parseInt(prompt('How many transactions to start?', '1'));
-            if (isNaN(count) || count < 1) {
-                showNotification('Please enter a valid number', 'error');
-                return;
-            }
+            if (!confirm('This will start transactions based on remote_start_profiles.csv. Continue?')) return;
             
             try {
                 const response = await fetch('/api/remote/start-all', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ count: count })
+                    headers: { 'Content-Type': 'application/json' }
                 });
                 if (response.ok) {
-                    showNotification(count + ' transactions started', 'success');
+                    const result = await response.json();
+                    showNotification('Remote start initiated for all profiles', 'success');
                     await refreshTransactions();
                 } else {
-                    showNotification('Failed to start transactions', 'error');
+                    const err = await response.text();
+                    showNotification('Failed to start transactions: ' + err, 'error');
                 }
             } catch (err) {
                 showNotification('Error: ' + err.message, 'error');
             }
         }
+        
+        // Show remote start modal
+        let currentRemoteStartCP = '';
+        let currentRemoteStartConnectors = [];
+        
+        function showRemoteStartModal(chargeBoxId, connectors) {
+            currentRemoteStartCP = chargeBoxId;
+            currentRemoteStartConnectors = connectors;
+            
+            const connectorHtml = connectors.map(function(conn) {
+                return '<button class="btn-primary" style="margin: 5px;" onclick="remoteStartConnector(\'' + chargeBoxId + '\', ' + conn + ')">' +
+                    'Connector ' + conn +
+                    '</button>';
+            }).join('');
+            
+            document.getElementById('connectorSelection').innerHTML = connectorHtml;
+            document.getElementById('remoteStartModal').classList.add('active');
+        }
+        
+        function closeRemoteStartModal() {
+            document.getElementById('remoteStartModal').classList.remove('active');
+        }
+        
+        // Remote start for specific connector
+        async function remoteStartConnector(chargeBoxId, connectorId) {
+            closeRemoteStartModal();
+            
+            try {
+                const response = await fetch('/api/remote/start/' + chargeBoxId + '/' + connectorId, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    showNotification('Remote start initiated for ' + chargeBoxId + ' connector ' + connectorId, 'success');
+                    await refreshTransactions();
+                } else {
+                    const err = await response.text();
+                    showNotification('Failed: ' + err, 'error');
+                }
+            } catch (err) {
+                showNotification('Error: ' + err.message, 'error');
+            }
+        }
+        
+        // Remote stop for specific transaction
+        async function remoteStopTransaction(chargeBoxId, connectorId) {
+            try {
+                const response = await fetch('/api/remote/stop/' + chargeBoxId + '/' + connectorId, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    showNotification('Remote stop initiated for ' + chargeBoxId + ' connector ' + connectorId, 'success');
+                    await refreshTransactions();
+                } else {
+                    const err = await response.text();
+                    showNotification('Failed: ' + err, 'error');
+                }
+            } catch (err) {
+                showNotification('Error: ' + err.message, 'error');
+            }
+        }
+        
+        // Trigger manual commands (boot, heartbeat)
+        async function triggerCommand(chargeBoxId, command) {
+            try {
+                let endpoint = '';
+                
+                switch(command) {
+                    case 'boot':
+                        endpoint = '/api/ocpp/' + chargeBoxId + '/boot';
+                        break;
+                    case 'heartbeat':
+                        endpoint = '/api/ocpp/' + chargeBoxId + '/heartbeat';
+                        break;
+                    default:
+                        showNotification('Unknown command: ' + command, 'error');
+                        return;
+                }
+                
+                const response = await fetch(endpoint, {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    showNotification(command.charAt(0).toUpperCase() + command.slice(1) + ' sent to ' + chargeBoxId, 'success');
+                } else {
+                    const err = await response.text();
+                    showNotification('Failed: ' + err, 'error');
+                }
+            } catch (err) {
+                showNotification('Error: ' + err.message, 'error');
+            }
+        }
+        
+        // Status notification modal
+        let currentStatusCP = '';
+        let currentStatusConnectors = [];
+        
+        function showStatusModal(chargeBoxId, connectors) {
+            currentStatusCP = chargeBoxId;
+            currentStatusConnectors = connectors;
+            
+            // Update CP name
+            document.getElementById('statusModalCP').textContent = chargeBoxId;
+            
+            // Populate connector dropdown
+            const select = document.getElementById('statusConnectorSelect');
+            select.innerHTML = '<option value="0">0 (Charge Point)</option>';
+            connectors.forEach(function(conn) {
+                select.innerHTML += '<option value="' + conn + '">' + conn + '</option>';
+            });
+            
+            document.getElementById('statusModal').classList.add('active');
+        }
+        
+        function closeStatusModal() {
+            document.getElementById('statusModal').classList.remove('active');
+        }
+        
+        async function sendStatusNotification() {
+            const connectorId = parseInt(document.getElementById('statusConnectorSelect').value);
+            const status = document.getElementById('statusSelect').value;
+            
+            closeStatusModal();
+            
+            try {
+                const response = await fetch('/api/ocpp/' + currentStatusCP + '/status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ connectorId: connectorId, status: status })
+                });
+                
+                if (response.ok) {
+                    showNotification('Status "' + status + '" sent for connector ' + connectorId + ' of ' + currentStatusCP, 'success');
+                } else {
+                    const err = await response.text();
+                    showNotification('Failed: ' + err, 'error');
+                }
+            } catch (err) {
+                showNotification('Error: ' + err.message, 'error');
+            }
+        }
+        
+        // Load CSV data for display
+        async function loadCSVData() {
+            try {
+                const response = await fetch('/api/csv/data');
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    // Update chargepoints table
+                    const cpBody = document.getElementById('csvChargepointsBody');
+                    if (data.chargepoints && data.chargepoints.length > 0) {
+                        cpBody.innerHTML = data.chargepoints.map(function(cp, index) {
+                            return '<tr>' +
+                                '<td>' + (index + 1) + '</td>' +
+                                '<td><strong>' + cp.chargeBoxId + '</strong></td>' +
+                                '<td>' + cp.connectors + '</td>' +
+                            '</tr>';
+                        }).join('');
+                    } else {
+                        cpBody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #999;">No data loaded</td></tr>';
+                    }
+                    
+                    // Update profiles table
+                    const profBody = document.getElementById('csvProfilesBody');
+                    if (data.profiles && data.profiles.length > 0) {
+                        profBody.innerHTML = data.profiles.map(function(prof, index) {
+                            return '<tr>' +
+                                '<td>' + (index + 1) + '</td>' +
+                                '<td><strong>' + prof.chargeBoxId + '</strong></td>' +
+                                '<td>' + prof.connectorId + '</td>' +
+                                '<td>' + (prof.profileName || prof.idTag) + '</td>' +
+                            '</tr>';
+                        }).join('');
+                    } else {
+                        profBody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #999;">No data loaded</td></tr>';
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to load CSV data:', err);
+            }
+        }
 
+        
+        // Utility: Format timestamp to local time
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return 'N/A';
+            const date = new Date(timestamp);
+            return date.toLocaleString();
+        }
         
         // Tab switching
         function switchTab(tabName, event) {
@@ -936,6 +1240,25 @@ const indexHTML = `<!DOCTYPE html>
             document.getElementById(tabName).classList.add('active');
             
             // Add active class to clicked tab button
+            if (event && event.target) {
+                event.target.classList.add('active');
+            }
+        }
+        
+        // CSV Tab switching
+        function switchCSVTab(tabName, event) {
+            // Remove active from CSV tabs
+            document.querySelectorAll('#csvData .tab').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.csv-tab-content').forEach(el => el.style.display = 'none');
+            
+            // Show selected tab
+            if (tabName === 'chargepoints') {
+                document.getElementById('csvChargepointsTab').style.display = 'block';
+            } else if (tabName === 'profiles') {
+                document.getElementById('csvProfilesTab').style.display = 'block';
+            }
+            
+            // Activate clicked tab
             if (event && event.target) {
                 event.target.classList.add('active');
             }
@@ -980,17 +1303,24 @@ const indexHTML = `<!DOCTYPE html>
             }
             
             tbody.innerHTML = cps.map(function(cp) {
+                const connectors = Object.keys(cp.status.connectors);
+                const manageButtons = '<div style="display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">' +
+                    '<button class="btn-icon btn-success" onclick="showRemoteStartModal(\'' + cp.chargeBoxId + '\', ' + JSON.stringify(connectors) + ')" title="Remote Start">▶️</button>' +
+                    '<button class="btn-icon btn-secondary" onclick="triggerCommand(\'' + cp.chargeBoxId + '\', \'boot\')" title="Boot Notification">🔌</button>' +
+                    '<button class="btn-icon btn-secondary" onclick="triggerCommand(\'' + cp.chargeBoxId + '\', \'heartbeat\')" title="Heartbeat">💓</button>' +
+                    '<button class="btn-icon btn-secondary" onclick="showStatusModal(\'' + cp.chargeBoxId + '\', ' + JSON.stringify(connectors) + ')" title="Status Notification">📡</button>' +
+                    '<button class="btn-icon btn-secondary" onclick="viewCPLogs(\'' + cp.chargeBoxId + '\')" title="View Logs">📝</button>' +
+                    '<button class="btn-icon btn-danger" onclick="stopCP(\'' + cp.chargeBoxId + '\')" title="Stop CP">⏹️</button>' +
+                    '</div>';
+                
                 return '<tr>' +
                     '<td><strong>' + cp.chargeBoxId + '</strong></td>' +
                     '<td><span class="status-badge status-' + cp.status.status + '">' + cp.status.status + '</span></td>' +
-                    '<td>' + Object.keys(cp.status.connectors).length + '</td>' +
+                    '<td>' + connectors.length + '</td>' +
                     '<td>' + cp.status.activeTransactionCount + '</td>' +
                     '<td>' + cp.status.messageCount + '</td>' +
-                    '<td style="font-size: 12px;">' + new Date(cp.status.lastBootTime).toLocaleTimeString() + '</td>' +
-                    '<td>' +
-                        '<button class="btn-sm btn-secondary" onclick="viewCPLogs(\'' + cp.chargeBoxId + '\')">Logs</button>' +
-                        '<button class="btn-sm btn-danger" onclick="stopCP(\'' + cp.chargeBoxId + '\')">Stop</button>' +
-                    '</td>' +
+                    '<td style="font-size: 12px;">' + formatTimestamp(cp.status.lastBootTime) + '</td>' +
+                    '<td>' + manageButtons + '</td>' +
                 '</tr>';
             }).join('');
         }
@@ -1015,10 +1345,11 @@ const indexHTML = `<!DOCTYPE html>
                         '<td>' + txn.chargeBoxId + '</td>' +
                         '<td>' + txn.connectorId + '</td>' +
                         '<td>' + txn.idTag + '</td>' +
-                        '<td style="font-size: 12px;">' + new Date(txn.startTime).toLocaleTimeString() + '</td>' +
+                        '<td style="font-size: 12px;">' + formatTimestamp(txn.startTime) + '</td>' +
                         '<td><span class="status-badge status-charging">' + txn.status + '</span></td>' +
                         '<td>' +
-                            '<button class="btn-sm btn-danger" onclick="stopTransaction(\'' + txn.chargeBoxId + '\', ' + txn.connectorId + ')">Stop</button>' +
+                            '<button class="btn-sm btn-danger" onclick="remoteStopTransaction(\'' + txn.chargeBoxId + '\', ' + txn.connectorId + ')">Remote Stop</button> ' +
+                            '<button class="btn-sm btn-secondary" onclick="stopTransaction(\'' + txn.chargeBoxId + '\', ' + txn.connectorId + ')">Local Stop</button>' +
                         '</td>' +
                     '</tr>';
                 }).join('');
@@ -1040,7 +1371,7 @@ const indexHTML = `<!DOCTYPE html>
             
             container.innerHTML = logs.map(function(log) {
                 return '<div class="log-entry">' +
-                    '<span class="log-timestamp">' + log.timestamp + '</span>' +
+                    '<span class="log-timestamp">' + formatTimestamp(log.timestamp) + '</span>' +
                     '<span class="log-cp">[' + log.chargeBoxId + ']</span>' +
                     '<span class="log-direction">' + log.direction + '</span>' +
                     '<span class="log-action">' + log.action + '</span>' +
@@ -1084,24 +1415,30 @@ const indexHTML = `<!DOCTYPE html>
         async function viewCPLogs(chargeBoxId) {
             try {
                 const response = await fetch('/api/logs/' + chargeBoxId);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch logs: ' + response.statusText);
+                }
                 const logs = await response.json() || [];
                 
                 const container = document.getElementById('logsContainer');
                 if (logs.length === 0) {
-                    container.innerHTML = '<p style="color: #999;">No logs for ' + chargeBoxId + '</p>';
+                    container.innerHTML = '<p style="color: #999;">No logs for <strong>' + chargeBoxId + '</strong></p>';
                 } else {
-                    container.innerHTML = logs.map(function(log) {
-                        return '<div class="log-entry">' +
-                            '<span class="log-timestamp">' + log.timestamp + '</span>' +
-                            '<span class="log-direction">' + log.direction + '</span>' +
-                            '<span class="log-action">' + log.action + '</span>' +
-                        '</div>';
-                    }).join('');
+                    container.innerHTML = '<h3 style="margin-bottom: 15px; color: #667eea;">Logs for ' + chargeBoxId + '</h3>' +
+                        logs.map(function(log) {
+                            return '<div class="log-entry">' +
+                                '<span class="log-timestamp">' + formatTimestamp(log.timestamp) + '</span> ' +
+                                '<span class="log-direction">' + log.direction + '</span> ' +
+                                '<span class="log-action">' + log.action + '</span> ' +
+                                '<span style="color: #98c379;">' + (log.messageType || '') + '</span>' +
+                            '</div>';
+                        }).join('');
                 }
                 
-                switchTab('logs', { target: document.querySelector('.tab:nth-child(4)') });
+                // Switch to logs tab - it's the 4th tab (index 4 in nth-child since it's 1-based)
+                switchTab('logs', { target: document.querySelectorAll('.tab')[3] });
             } catch (err) {
-                showNotification('Error: ' + err.message, 'error');
+                showNotification('Error fetching logs: ' + err.message, 'error');
             }
         }
         
@@ -1202,6 +1539,7 @@ const indexHTML = `<!DOCTYPE html>
             // Initial load
             loadSavedConfig();
             updateCSVStatus();
+            loadCSVData();
             refreshMetrics().then((metrics) => {
                 // Only start auto-refresh if there are already active CPs
                 // (e.g., if page was refreshed while CPs were running)
@@ -1219,6 +1557,19 @@ const indexHTML = `<!DOCTYPE html>
             // Cleanup on page unload
             window.addEventListener('beforeunload', () => {
                 stopAutoRefresh();
+            });
+            
+            // Close modal on background click
+            document.getElementById('remoteStartModal').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeRemoteStartModal();
+                }
+            });
+            
+            document.getElementById('statusModal').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeStatusModal();
+                }
             });
         });
     </script>

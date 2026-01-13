@@ -128,6 +128,37 @@ func (m *Manager) GetCSVStatus() map[string]interface{} {
 	}
 }
 
+// GetCSVData returns the CSV data for display in UI
+func (m *Manager) GetCSVData() map[string]interface{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// Convert chargepoints map to array for display
+	chargepoints := make([]map[string]interface{}, 0, len(m.chargepointConfigs))
+	for _, cp := range m.chargepointConfigs {
+		chargepoints = append(chargepoints, map[string]interface{}{
+			"chargeBoxId": cp.ChargeBoxId,
+			"connectors":  cp.ConnectorCount,
+		})
+	}
+	
+	// Convert profiles to array for display
+	profiles := make([]map[string]interface{}, 0, len(m.remoteStartProfiles))
+	for _, p := range m.remoteStartProfiles {
+		profiles = append(profiles, map[string]interface{}{
+			"chargeBoxId": p.ChargeBoxId,
+			"connectorId": p.ConnectorId,
+			"idTag":       p.ProfileName,
+			"profileName": p.ProfileName,
+		})
+	}
+	
+	return map[string]interface{}{
+		"chargepoints": chargepoints,
+		"profiles":     profiles,
+	}
+}
+
 // StartCPs starts N charge points - FIXED VERSION WITH DETAILED RESULTS
 func (m *Manager) StartCPs(ctx context.Context, count int, cfg *configs.SimulatorConfig) (map[string]interface{}, error) {
 	m.mu.RLock()
@@ -411,20 +442,29 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 	profiles := m.remoteStartProfiles
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("CP not found")
+		return fmt.Errorf("CP '%s' not found in active instances", chargeBoxId)
 	}
+
+	m.logger.LogInfo(chargeBoxId, fmt.Sprintf("Looking for remote start profile: chargeBoxId=%s, connectorId=%d, total profiles=%d", chargeBoxId, connectorId, len(profiles)))
 
 	// Find matching profile
 	var profile *models.RemoteStartProfile
 	for _, p := range profiles {
+		m.logger.LogInfo(chargeBoxId, fmt.Sprintf("Checking profile: chargeBoxId=%s, connectorId=%s, profileName=%s", p.ChargeBoxId, p.ConnectorId, p.ProfileName))
 		if (p.ChargeBoxId == chargeBoxId || p.ChargeBoxId == "*") &&
 			(p.ConnectorId == fmt.Sprintf("%d", connectorId) || p.ConnectorId == "*") {
 			profile = p
+			m.logger.LogInfo(chargeBoxId, fmt.Sprintf("Found matching profile: %s", p.ProfileName))
 			break
 		}
 	}
 	if profile == nil {
-		return fmt.Errorf("no matching remote start profile for CP")
+		return fmt.Errorf("no matching remote start profile for CP '%s' connector %d (available profiles: %d)", chargeBoxId, connectorId, len(profiles))
+	}
+
+	// Check if remote start URL is configured
+	if instance.remoteStartURL == "" {
+		return fmt.Errorf("remote start URL not configured")
 	}
 
 	// Call remote start HTTP API
@@ -442,24 +482,26 @@ func (m *Manager) RemoteStartTransaction(ctx context.Context, chargeBoxId string
 	}
 
 	body, _ := json.Marshal(payload)
+	m.logger.LogInfo(chargeBoxId, fmt.Sprintf("Sending remote start request to %s", instance.remoteStartURL))
+	
 	req, _ := http.NewRequestWithContext(ctx, "POST", instance.remoteStartURL, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if instance.remoteStartToken != "" {
 		req.Header.Set("Authorization", instance.remoteStartToken)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote start HTTP error: %v", err))
-		return err
+		return fmt.Errorf("remote start HTTP request failed: %v", err)
 	}
 
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote start HTTP error: %d - %s", resp.StatusCode, string(body)))
-		return fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		m.logger.LogError(chargeBoxId, fmt.Sprintf("remote start HTTP error: %d - %s", resp.StatusCode, string(bodyBytes)))
+		return fmt.Errorf("remote start HTTP error: %d - %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Start transaction in CP
@@ -555,4 +597,106 @@ func (m *Manager) RemoteStopAllTransactions(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+}
+
+// RemoteStartAllTransactions starts transactions for all profiles in the CSV
+func (m *Manager) RemoteStartAllTransactions(ctx context.Context) error {
+	m.mu.RLock()
+	profiles := make([]*models.RemoteStartProfile, len(m.remoteStartProfiles))
+	copy(profiles, m.remoteStartProfiles)
+	instances := make(map[string]*CPInstance)
+	for k, v := range m.instances {
+		instances[k] = v
+	}
+	m.mu.RUnlock()
+
+	if len(profiles) == 0 {
+		return fmt.Errorf("no remote start profiles loaded")
+	}
+
+	if len(instances) == 0 {
+		return fmt.Errorf("no active charge points")
+	}
+
+	var wg sync.WaitGroup
+	type result struct {
+		success bool
+		err     error
+		profile string
+	}
+	results := make(chan result, len(profiles))
+
+	for _, profile := range profiles {
+		// Find matching CP
+		var matchedCP *CPInstance
+		var connectorId int
+
+		// Parse connector ID
+		if profile.ConnectorId == "*" {
+			connectorId = 1 // Default to connector 1
+		} else {
+			fmt.Sscanf(profile.ConnectorId, "%d", &connectorId)
+			if connectorId == 0 {
+				connectorId = 1
+			}
+		}
+
+		// Match charge box
+		if profile.ChargeBoxId == "*" {
+			// Start on first available CP
+			for _, inst := range instances {
+				matchedCP = inst
+				break
+			}
+		} else {
+			matchedCP = instances[profile.ChargeBoxId]
+		}
+
+		if matchedCP == nil {
+			errMsg := fmt.Sprintf("CP '%s' not found for profile %s (available CPs: %d)", profile.ChargeBoxId, profile.ProfileName, len(instances))
+			m.logger.LogError("RemoteStartAll", errMsg)
+			results <- result{success: false, err: fmt.Errorf(errMsg), profile: profile.ProfileName}
+			continue
+		}
+
+		wg.Add(1)
+		go func(cp *CPInstance, conn int, prof *models.RemoteStartProfile) {
+			defer wg.Done()
+			err := m.RemoteStartTransaction(ctx, cp.config.ChargeBoxId, conn)
+			if err != nil {
+				m.logger.LogError("RemoteStartAll", fmt.Sprintf("Failed to start %s: %v", prof.ProfileName, err))
+				results <- result{success: false, err: err, profile: prof.ProfileName}
+			} else {
+				results <- result{success: true, profile: prof.ProfileName}
+			}
+		}(matchedCP, connectorId, profile)
+	}
+
+	wg.Wait()
+	close(results)
+
+	startedCount := 0
+	errorCount := 0
+	var firstError error
+
+	for res := range results {
+		if res.success {
+			startedCount++
+		} else {
+			errorCount++
+			if firstError == nil {
+				firstError = res.err
+			}
+		}
+	}
+
+	if errorCount > 0 {
+		if startedCount == 0 {
+			return fmt.Errorf("failed to start all transactions: %v", firstError)
+		}
+		return fmt.Errorf("started %d transactions with %d errors: %v", startedCount, errorCount, firstError)
+	}
+
+	m.logger.LogInfo("RemoteStartAll", fmt.Sprintf("Started %d transactions", startedCount))
+	return nil
 }
